@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
+import shutil
 import argparse
+import random
 
 from logging import getLogger, DEBUG, basicConfig
 
@@ -26,9 +28,21 @@ class Voc2Yolo(object):
         self._yaml_hd = YamlHandler()
         self._txt_hd = TxtHandler()
         self._xml_file_picker = GetFileListBySuffix(file_suffix='.xml')
-        self._txt_file_path_gen = OutputFilePathGenerator(
+        self._train_txt_file_path_gen = OutputFilePathGenerator(
             out_suffix='.txt',
-            output_dir=str(Path(self._out_dir) / 'labels'),
+            output_dir=str(Path(self._out_dir) / 'train/labels'),
+        )
+        self._valid_txt_file_path_gen = OutputFilePathGenerator(
+            out_suffix='.txt',
+            output_dir=str(Path(self._out_dir) / 'valid/labels'),
+        )
+        self._train_jpg_file_path_gen = OutputFilePathGenerator(
+            out_suffix='.jpg',
+            output_dir=str(Path(self._out_dir) / 'train/images'),
+        )
+        self._valid_jpg_file_path_gen = OutputFilePathGenerator(
+            out_suffix='.jpg',
+            output_dir=str(Path(self._out_dir) / 'valid/images'),
         )
 
     @staticmethod
@@ -59,9 +73,13 @@ class Voc2Yolo(object):
         pb_data = self._pbtxt_ana.parse(pbtxt_path)
         return list(pb_data.keys())
 
-    def convert_xml_files(self, xml_dir: str):
+    def convert_xml_and_copy_img_files(self, xml_dir: str, image_dir: str, training_files_ratio: float):
         xml_file_list = self._xml_file_picker(xml_dir)
-        for f in xml_file_list:
+        random.shuffle(xml_file_list)
+        xml_length = len(xml_file_list)
+        train_xml_file_list = xml_file_list[:int(xml_length * training_files_ratio)]
+        valid_xml_file_list = xml_file_list[int(xml_length * training_files_ratio):]
+        for f in train_xml_file_list:
             ds = self._xml_ana.parse(f)
             size = ds.size
             print_list = []
@@ -71,23 +89,43 @@ class Voc2Yolo(object):
                 coord = (name_id,) + coord
                 print_list.append(" ".join(str(x) for x in coord))
 
-            txt_file_path = self._txt_file_path_gen(f)
+            txt_file_path = self._train_txt_file_path_gen(f)
             self._txt_hd.write(print_list, txt_file_path)
 
-    def parse(self, annot_dir: str, pbtxt_path: str):
+            jpg_file_name = Path(self._train_jpg_file_path_gen(f))
+            shutil.copy2(f'{image_dir}/{Path(jpg_file_name).name}', jpg_file_name)
+
+        for f in valid_xml_file_list:
+            ds = self._xml_ana.parse(f)
+            size = ds.size
+            print_list = []
+            for name, box in ds.objects:
+                name_id = self._class_list.index(name)
+                coord = self.coordinate2yolo(size, box)
+                coord = (name_id,) + coord
+                print_list.append(" ".join(str(x) for x in coord))
+
+            txt_file_path = self._valid_txt_file_path_gen(f)
+            self._txt_hd.write(print_list, txt_file_path)
+
+            jpg_file_name = Path(self._valid_jpg_file_path_gen(f))
+            shutil.copy2(f'{image_dir}/{Path(jpg_file_name).name}', jpg_file_name)
+
+    def parse(self, annot_dir: str, pbtxt_path: str, image_dir: str, training_files_ratio: float):
         self._class_list = self.parse_pbtxt(pbtxt_path)
         assert self._class_list is not None, "Probably failed to parse the pttxt file."
         d_yaml = self.dict_for_yolo_yaml(self._yaml_file_stem, self._class_list)
         p_out_dir = Path(self._out_dir)
         p_yaml_file = p_out_dir / Path(self._yaml_file_stem + '.yaml')
         self._yaml_hd.write(d_yaml, str(p_yaml_file))
-        self.convert_xml_files(annot_dir)
+        self.convert_xml_and_copy_img_files(annot_dir, image_dir, training_files_ratio)
 
 
 def parse_option():
     k_TARGET_DIR = './PascalVOC-export'
     k_OUT_DIR = './yolo_out'
     k_YAML_NAME = 'data'
+    k_TRAINING_FILES_RATIO = 0.8
 
     dc = """
         This script converts the Pascal-VOC format *.xml files output from VoTT ver2.* to the yolo format *.txt files .
@@ -109,12 +147,17 @@ def parse_option():
                         help=f"Specify the reference *.xml files directory if you need.")
     parser.add_argument('--pbtxt_file', type=str, dest='pbtxt_file', default=None,
                         help=f"Specify the reference *.pbtxt file if you need.")
+    parser.add_argument('--image_dir', type=str, dest='image_dir', default=None,
+                        help=f"")
+    parser.add_argument('--trainig_files_ratio', type=float, dest='training_files_ratio', default=k_TRAINING_FILES_RATIO,
+                        help=f"")
 
     return parser.parse_args()
 
 
 def main():
     k_XML_ANNOT_DIR = 'Annotations'
+    k_IMAGE_DIR = 'JPEGImages'
     k_PBTXT_FILE = 'pascal_label_map.pbtxt'
 
     args = parse_option()
@@ -122,7 +165,9 @@ def main():
     out_dir = args.out_dir
     yaml_name = args.yaml_name
     annot_dir = args.annot_dir
+    image_dir = args.image_dir
     pbtxt_file = args.pbtxt_file
+    trainig_files_ratio = args.training_files_ratio
 
     try:
         p_target_dir = Path(target_dir)
@@ -136,9 +181,11 @@ def main():
             )
         f_y = p_target_dir.glob(k_PBTXT_FILE)
         d_y = p_target_dir.glob(k_XML_ANNOT_DIR)
+        i_y = p_target_dir.glob(k_IMAGE_DIR)
 
         pbtxt_file = str(next(f_y)) if pbtxt_file is None else pbtxt_file
         annot_dir = str(next(d_y)) if annot_dir is None else annot_dir
+        image_dir = str(next(i_y)) if image_dir is None else image_dir
 
         p_out_dir = Path(out_dir)
         if not p_out_dir.exists():
@@ -151,12 +198,14 @@ def main():
 
         logger.info(f"  Current target is '{target_dir}', then ...")
         logger.info(f" '{annot_dir}' was set as xml annotation directory.")
+        logger.info(f" '{image_dir}' was set as image directory.")
         logger.info(f" '{pbtxt_file}' was set as pbtxt file.")
         logger.info(f" '{out_dir}' was set as ouput directory.")
         logger.info(f" '{yaml_name}' was set as yaml file name stem.")
+        logger.info(f" '{trainig_files_ratio}' was set as training files ratio.")
 
         v2y = Voc2Yolo(out_dir, yaml_name)
-        v2y.parse(annot_dir, pbtxt_file)
+        v2y.parse(annot_dir, pbtxt_file, image_dir, trainig_files_ratio)
 
     except FileNotFoundError as e:
         logger.error(e)

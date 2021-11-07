@@ -85,7 +85,7 @@ class OutputFilePathGenerator(PathHandler):
         # If the specified directory does not exist, create it.
         p_out_dir = Path(self._output_dir)
         if not p_out_dir.exists():
-            p_out_dir.mkdir()
+            p_out_dir.mkdir(parents=True)
 
         p_tmp_file = p_file.with_suffix(self._output_suffix)
 
